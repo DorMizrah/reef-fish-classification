@@ -1,0 +1,142 @@
+# Mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Import Libraries
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import pathlib
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+
+# Set Dataset Path
+data_dir = pathlib.Path('/content/drive/MyDrive/code_for_AI/Images')
+
+# Load Data and Prepare Labels
+image_paths = [str(path) for path in data_dir.glob('*/*.jpg')]
+labels = [pathlib.Path(path).parent.name for path in image_paths]
+class_names = sorted(set(labels))
+num_classes = len(class_names)
+
+label_to_index = {name: index for index, name in enumerate(class_names)}
+labels_indices = [label_to_index[label] for label in labels]
+
+# Shuffle and Split Data
+data = list(zip(image_paths, labels_indices))
+np.random.seed(123)
+np.random.shuffle(data)
+image_paths, labels_indices = zip(*data)
+
+total_images = len(image_paths)
+train_size = int(0.8 * total_images)
+val_size = int(0.1 * total_images)
+
+train_paths, train_labels = image_paths[:train_size], labels_indices[:train_size]
+val_paths, val_labels = image_paths[train_size:train_size + val_size]
+test_paths, test_labels = image_paths[train_size + val_size:]
+
+# Preprocess Images
+img_height, img_width = 224, 224
+batch_size = 32
+
+def process_path(file_path, label):
+    img = tf.io.read_file(file_path)
+    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.image.resize(img, [img_height, img_width])
+    img = tf.keras.applications.resnet50.preprocess_input(img)
+    return img, label
+
+# Create Datasets
+train_ds = tf.data.Dataset.from_tensor_slices((list(train_paths), list(train_labels))).map(process_path).shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+val_ds = tf.data.Dataset.from_tensor_slices((list(val_paths), list(val_labels))).map(process_path).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+test_ds = tf.data.Dataset.from_tensor_slices((list(test_paths), list(test_labels))).map(process_path).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+# Data Augmentation
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip('horizontal_and_vertical'),
+    layers.RandomRotation(0.2),
+    layers.RandomZoom(0.2),
+    layers.RandomContrast(0.2),
+    layers.RandomBrightness(0.2),
+    layers.RandomTranslation(0.2, 0.2),
+])
+
+def augment(image, label):
+    return data_augmentation(image), label
+
+train_ds = train_ds.map(augment)
+
+# Load Pre-trained ResNet50 Model
+base_model = tf.keras.applications.ResNet50(input_shape=(img_height, img_width, 3), include_top=False, weights='imagenet')
+N = 140
+for layer in base_model.layers[:N]:
+    layer.trainable = False
+
+# Build Model
+inputs = tf.keras.Input(shape=(img_height, img_width, 3))
+x = base_model(inputs, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.5)(x)
+outputs = layers.Dense(num_classes, activation='softmax')(x)
+model = tf.keras.Model(inputs, outputs)
+
+# Compile Model
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# Train Model
+epochs = 10
+history = model.fit(train_ds, validation_data=val_ds, epochs=epochs)
+
+# Plot Training & Validation Accuracy and Loss
+acc, val_acc = history.history['accuracy'], history.history['val_accuracy']
+loss, val_loss = history.history['loss'], history.history['val_loss']
+
+plt.figure(figsize=(16, 8))
+plt.subplot(1, 2, 1)
+plt.plot(range(epochs), acc, label='Training Accuracy')
+plt.plot(range(epochs), val_acc, label='Validation Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training and Validation Accuracy')
+
+plt.subplot(1, 2, 2)
+plt.plot(range(epochs), loss, label='Training Loss')
+plt.plot(range(epochs), val_loss, label='Validation Loss')
+plt.legend(loc='upper right')
+plt.title('Training and Validation Loss')
+plt.show()
+
+# Evaluate Model
+test_loss, test_acc = model.evaluate(test_ds)
+print('\nTest accuracy:', test_acc)
+
+# Generate Confusion Matrix and Classification Report
+y_true = np.concatenate([y for x, y in test_ds], axis=0)
+y_pred = np.argmax(model.predict(test_ds), axis=-1)
+
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+plt.xlabel('Predicted Label')
+plt.ylabel('True Label')
+plt.title('Confusion Matrix')
+plt.show()
+
+print('Classification Report:')
+print(classification_report(y_true, y_pred, target_names=class_names))
+
+# Display Predictions on Test Images
+for images, labels in test_ds.take(1):
+    predictions = model.predict(images)
+    pred_labels = np.argmax(predictions, axis=1)
+    plt.figure(figsize=(15, 15))
+    for i in range(9):
+        ax = plt.subplot(3, 3, i + 1)
+        plt.imshow(images[i].numpy().astype("uint8"))
+        true_label = class_names[labels[i]]
+        predicted_label = class_names[pred_labels[i]]
+        plt.title(f'True: {true_label}\nPred: {predicted_label}')
+        plt.axis('off')
+    plt.show()
